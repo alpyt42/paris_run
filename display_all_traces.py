@@ -663,25 +663,48 @@ def create_animation_html(traces, max_segments=10, width=800, height=600):
 
         function centerMap() {
             if (traces.length === 0) return;
-            var allLats = [];
-            var allLngs = [];
+            
+            // D'abord centrer sur le premier point avec un zoom approprié
+            if (traces[0] && traces[0].points && traces[0].points.length > 0) {
+                var firstPoint = traces[0].points[0];
+                map.setView([firstPoint[0], firstPoint[1]], 15);
+            }
+            
+            // Fonction existante pour calculer les limites (utilisée par le bouton "Voir tout")
+            function fitAllBounds() {
+                var allLats = [];
+                var allLngs = [];
 
-            traces.forEach(function(trace) {
-                trace.points.forEach(function(pt) {
-                    allLats.push(pt[0]);
-                    allLngs.push(pt[1]);
+                traces.forEach(function(trace) {
+                    trace.points.forEach(function(pt) {
+                        allLats.push(pt[0]);
+                        allLngs.push(pt[1]);
+                    });
                 });
-            });
 
-            var minLat = Math.min(...allLats);
-            var maxLat = Math.max(...allLats);
-            var minLng = Math.min(...allLngs);
-            var maxLng = Math.max(...allLngs);
+                var minLat = Math.min(...allLats);
+                var maxLat = Math.max(...allLats);
+                var minLng = Math.min(...allLngs);
+                var maxLng = Math.max(...allLngs);
 
-            map.fitBounds([
-                [minLat, minLng],
-                [maxLat, maxLng]
-            ]);
+                map.fitBounds([
+                    [minLat, minLng],
+                    [maxLat, maxLng]
+                ]);
+            }
+            
+            // Ajouter un bouton pour voir tous les segments
+            if (!window.viewAllButtonAdded && traces.length > 1) {
+                var viewAllButton = L.control({position: 'topright'});
+                viewAllButton.onAdd = function() {
+                    var div = L.DomUtil.create('div', 'view-all-button');
+                    div.innerHTML = '<button style="background-color:#3366cc;color:white;border:none;border-radius:4px;padding:8px 12px;cursor:pointer;font-weight:bold;">Voir tout</button>';
+                    div.firstChild.addEventListener('click', fitAllBounds);
+                    return div;
+                };
+                viewAllButton.addTo(map);
+                window.viewAllButtonAdded = true;
+            }
         }
 
         function initAnimation() {
@@ -778,14 +801,263 @@ def create_animation_html(traces, max_segments=10, width=800, height=600):
     return html
 
 
-def generate_google_maps_link(points):
-    """Génère un lien Google Maps à partir d'une liste de (lat, lon)."""
-    if not points:
-        return ""
-    base_url = "https://www.google.com/maps/dir/"
-    path = "/".join([f"{p[0]},{p[1]}" for p in points])
-    return f"{base_url}{path}"
+def create_segment_animation_html(trace, width=800, height=600):
+    """
+    Crée un code HTML contenant une animation Leaflet pour un seul segment.
+    """
+    if not trace or not trace.get('points') or len(trace['points']) < 2:
+        return """
+        <div style="text-align:center;padding:20px;background-color:#f8f9fa;border-radius:5px;">
+            <p>Pas assez de points pour créer une animation</p>
+        </div>
+        """
 
+    animation_speed = st.session_state.get('segment_animation_speed', 100)
+
+    html = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        #map { width: 100%; height: 100vh; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            z-index: 1000;
+            text-align: center;
+        }
+        button {
+            background: #3366cc;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 15px;
+            margin: 0 5px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background: #254e8f; }
+        #progress {
+            width: 100%;
+            height: 10px;
+            background: #eee;
+            margin-top: 10px;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        #progress-bar {
+            height: 100%;
+            width: 0%;
+            background: #3366cc;
+            transition: width 0.2s;
+        }
+        #info {
+            background: #f8f9fa;
+            padding: 5px 10px;
+            margin-top: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+    </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/leaflet.css"/>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/leaflet.js"></script>
+</head>
+<body>
+    <div id="controls">
+        <button id="play">▶️ Play</button>
+        <button id="pause">⏸️ Pause</button>
+        <button id="reset">🔄 Reset</button>
+        <div id="progress"><div id="progress-bar"></div></div>
+        <div id="info">Point: 0 / 0</div>
+    </div>
+    <div id="map"></div>
+    <script>
+        var map = L.map('map').setView([48.8566, 2.3522], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        var points = """ + json.dumps(trace['points']) + """;
+        var segment = """ + str(trace['segment']) + """;
+
+        var animationId;
+        var currentPointIndex = 0;
+        var speed = """ + str(animation_speed) + """;
+        var isPlaying = false;
+        var color = '#3366cc';
+
+        var path = null;
+        var progressBar = document.getElementById('progress-bar');
+        var infoBox = document.getElementById('info');
+
+        function centerMap() {
+            if (points.length === 0) return;
+            var allLats = [];
+            var allLngs = [];
+
+            points.forEach(function(pt) {
+                allLats.push(pt[0]);
+                allLngs.push(pt[1]);
+            });
+
+            var minLat = Math.min(...allLats);
+            var maxLat = Math.max(...allLats);
+            var minLng = Math.min(...allLngs);
+            var maxLng = Math.max(...allLngs);
+
+            map.fitBounds([
+                [minLat, minLng],
+                [maxLat, maxLng]
+            ]);
+        }
+
+        function initAnimation() {
+            centerMap();
+            resetAnimation();
+        }
+
+        function resetAnimation() {
+            if (animationId) {
+                clearTimeout(animationId);
+            }
+            isPlaying = false;
+            currentPointIndex = 0;
+
+            if (path) {
+                map.removeLayer(path);
+            }
+            path = L.polyline([], {
+                color: color,
+                weight: 5
+            }).addTo(map);
+
+            progressBar.style.width = '0%';
+            infoBox.textContent = 'Prêt à démarrer';
+        }
+
+        function animate() {
+            if (currentPointIndex >= points.length) {
+                isPlaying = false;
+                infoBox.textContent = 'Animation terminée';
+                return;
+            }
+
+            path.addLatLng(points[currentPointIndex]);
+            map.panTo(points[currentPointIndex]);
+
+            var progress = (currentPointIndex / points.length) * 100;
+            progressBar.style.width = progress + '%';
+            infoBox.textContent = `Point: ${currentPointIndex+1}/${points.length}`;
+
+            currentPointIndex++;
+
+            if (isPlaying) {
+                animationId = setTimeout(animate, speed);
+            }
+        }
+
+        document.getElementById('play').addEventListener('click', function() {
+            if (!isPlaying) {
+                isPlaying = true;
+                animate();
+            }
+        });
+
+        document.getElementById('pause').addEventListener('click', function() {
+            isPlaying = false;
+            if (animationId) {
+                clearTimeout(animationId);
+            }
+        });
+
+        document.getElementById('reset').addEventListener('click', resetAnimation);
+
+        initAnimation();
+    </script>
+</body>
+</html>
+"""
+    return html
+
+
+import urllib.parse
+
+def generate_google_maps_link(points):
+    """
+    Génère un lien Google Maps pour visualiser l'itinéraire d'un tracé GPX.
+    
+    Args:
+        points: Liste de tuples (latitude, longitude) représentant le tracé.
+    
+    Returns:
+        str: URL Google Maps complète pour visualiser l'itinéraire.
+        
+    Notes:
+        - Limite le nombre de points à 10 pour respecter les restrictions d'URL de Google
+        - Utilise les coordonnées décimales pour l'itinéraire principal
+        - Ajoute les coordonnées DMS pour le départ et l'arrivée en paramètres informatifs
+    """
+    if not points or len(points) < 2:
+        return "https://www.google.com/maps"
+    
+    # ----------- 1) Échantillonnage des points si trop nombreux (limite URL) ------------
+    if len(points) > 10:
+        # Garder premier, dernier et points intermédiaires distribués uniformément
+        step = (len(points) - 1) // 8  # Pour avoir ~10 points au total
+        sampled_indices = [0] + [i for i in range(step, len(points)-1, step)][:8] + [len(points)-1]
+        route_points = [points[i] for i in sampled_indices]
+    else:
+        route_points = points
+    
+    # ----------- 2) Construction de l'itinéraire en décimal ------------
+    base_url = "https://www.google.com/maps/dir/"
+    decimal_coords = [f"{lat:.6f},{lon:.6f}" for lat, lon in route_points]
+    path = "/".join(decimal_coords)
+    
+    # ----------- 3) Fonction utilitaire pour convertir décimal en DMS ---
+    def decimal_to_dms(coord, is_lat=True):
+        """Convertit une coordonnée décimale en DMS (degrés, minutes, secondes)."""
+        abs_coord = abs(coord)
+        degrees = int(abs_coord)
+        minutes_float = (abs_coord - degrees) * 60
+        minutes = int(minutes_float)
+        seconds = (minutes_float - minutes) * 60
+        
+        direction = "N" if is_lat and coord >= 0 else "S" if is_lat else "E" if coord >= 0 else "W"
+        return f"{degrees}°{minutes}'{seconds:.1f}\"{direction}"
+    
+    # ----------- 4) Préparation du DMS pour le 1er et le dernier point --
+    lat1, lon1 = points[0]
+    latN, lonN = points[-1]
+    
+    start_dms = f"{decimal_to_dms(lat1, True)} {decimal_to_dms(lon1, False)}"
+    end_dms = f"{decimal_to_dms(latN, True)} {decimal_to_dms(lonN, False)}"
+    
+    # ----------- 5) Construction des paramètres de requête -------------------
+    query_params = [
+        f"start={urllib.parse.quote(start_dms)}",
+        f"end={urllib.parse.quote(end_dms)}",
+        "data=!4m2!4m1!3e2"  # Force le mode à pied
+    ]
+    query_string = "&".join(query_params)
+    
+    # ----------- 6) Assemblage final de l'URL ----------------------------
+    final_url = f"{base_url}{path}?{query_string}"
+    
+    # Vérifier que l'URL ne dépasse pas une taille raisonnable (2000 caractères est une limite courante)
+    if len(final_url) > 2000:
+        # Solution de repli: utiliser uniquement le premier et le dernier point
+        minimal_path = f"{points[0][0]:.6f},{points[0][1]:.6f}/{points[-1][0]:.6f},{points[-1][1]:.6f}"
+        return f"{base_url}{minimal_path}?{query_string}"
+        
+    return final_url
 
 def export_to_gpx(selected_trace):
     """
@@ -1056,54 +1328,89 @@ with tab3:
     selected_trace = next((t for t in traces if t['segment'] == segment_to_view), None)
 
     if selected_trace:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader(f"Segment {selected_trace['segment']}")
-            if selected_trace['points'] and len(selected_trace['points']) >= 2:
-                distance = 0.0
-                for i in range(len(selected_trace['points']) - 1):
-                    lat1, lon1 = selected_trace['points'][i]
-                    lat2, lon2 = selected_trace['points'][i + 1]
-                    R = 6371
-                    dLat = math.radians(lat2 - lat1)
-                    dLon = math.radians(lon2 - lon1)
-                    a = math.sin(dLat/2) * math.sin(dLat/2) + \
-                        math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * \
-                        math.sin(dLon/2) * math.sin(dLon/2)
-                    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-                    dist_segment = R * c
-                    distance += dist_segment
+        st.session_state['segment_animation_speed'] = st.slider(
+            "Vitesse d'animation du segment (ms)",
+            min_value=10,
+            max_value=500,
+            value=st.session_state.get('segment_animation_speed', 100),
+            step=10,
+            help="Contrôle la vitesse de l'animation (ms entre deux points)"
+        )
+        
+        tabs = st.tabs(["📊 Informations", "🎬 Animation", "🗺️ Carte statique"])
+        
+        with tabs[0]:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader(f"Segment {selected_trace['segment']}")
+                if selected_trace['points'] and len(selected_trace['points']) >= 2:
+                    distance = 0.0
+                    for i in range(len(selected_trace['points']) - 1):
+                        lat1, lon1 = selected_trace['points'][i]
+                        lat2, lon2 = selected_trace['points'][i + 1]
+                        R = 6371
+                        dLat = math.radians(lat2 - lat1)
+                        dLon = math.radians(lon2 - lon1)
+                        a = math.sin(dLat/2) * math.sin(dLat/2) + \
+                            math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * \
+                            math.sin(dLon/2) * math.sin(dLon/2)
+                        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+                        dist_segment = R * c
+                        distance += dist_segment
 
-                st.metric("Distance", f"{distance:.2f} km")
-                st.metric("Nombre de points", len(selected_trace['points']))
-                start_point = selected_trace['points'][0]
-                end_point = selected_trace['points'][-1]
+                    st.metric("Distance", f"{distance:.2f} km")
+                    st.metric("Nombre de points", len(selected_trace['points']))
+                    start_point = selected_trace['points'][0]
+                    end_point = selected_trace['points'][-1]
 
-                st.markdown(f"**Point de départ:** {start_point[0]:.6f}, {start_point[1]:.6f}")
-                st.markdown(f"**Point d'arrivée:** {end_point[0]:.6f}, {end_point[1]:.6f}")
+                    st.markdown(f"**Point de départ:** {start_point[0]:.6f}, {start_point[1]:.6f}")
+                    st.markdown(f"**Point d'arrivée:** {end_point[0]:.6f}, {end_point[1]:.6f}")
 
-                st.markdown("### Export")
-                gmaps_url = generate_google_maps_link(selected_trace['points'])
-                st.markdown(
-                    f'<a href="{gmaps_url}" class="export-btn" target="_blank">🗺️ Ouvrir dans Google Maps</a>',
-                    unsafe_allow_html=True
-                )
-
-                gpx_content = export_to_gpx(selected_trace)
-                if gpx_content:
-                    download_link = generate_download_link(
-                        gpx_content,
-                        f"segment_{selected_trace['segment']}.gpx",
-                        "📥 Télécharger le fichier GPX"
+                    st.markdown("### Export")
+                    gmaps_url = generate_google_maps_link(selected_trace['points'])
+                    st.markdown(
+                        f'<a href="{gmaps_url}" class="export-btn" target="_blank">🗺️ Ouvrir dans Google Maps</a>',
+                        unsafe_allow_html=True
                     )
-                    st.markdown(download_link, unsafe_allow_html=True)
-            else:
-                st.warning("Ce segment ne contient pas suffisamment de points pour calculer des statistiques.")
 
-        with col2:
+                    gpx_content = export_to_gpx(selected_trace)
+                    if gpx_content:
+                        download_link = generate_download_link(
+                            gpx_content,
+                            f"segment_{selected_trace['segment']}.gpx",
+                            "📥 Télécharger le fichier GPX"
+                        )
+                        st.markdown(download_link, unsafe_allow_html=True)
+                else:
+                    st.warning("Ce segment ne contient pas suffisamment de points pour calculer des statistiques.")
+
+            with col2:
+                segment_map = create_single_segment_map(selected_trace)
+                st.markdown('<div class="map-container">', unsafe_allow_html=True)
+                folium_static(segment_map, width=600, height=500)
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+        with tabs[1]:
+            st.subheader("Animation du tracé")
+            if selected_trace['points'] and len(selected_trace['points']) >= 2:
+                with st.spinner("Préparation de l'animation du segment..."):
+                    segment_animation_html = create_segment_animation_html(selected_trace)
+                    st.markdown('<div class="map-container">', unsafe_allow_html=True)
+                    st.components.v1.html(segment_animation_html, height=600, scrolling=False)
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    st.info(f"Animation basée sur les {len(selected_trace['points'])} points du segment {selected_trace['segment']}.")
+                    
+                    if len(selected_trace['points']) > 500:
+                        st.warning(f"Ce segment contient beaucoup de points ({len(selected_trace['points'])}). L'animation peut être lente sur certains appareils.")
+            else:
+                st.warning("Ce segment ne contient pas suffisamment de points pour l'animation.")
+                
+        with tabs[2]:
+            st.subheader("Carte statique")
             segment_map = create_single_segment_map(selected_trace)
             st.markdown('<div class="map-container">', unsafe_allow_html=True)
-            folium_static(segment_map, width=600, height=500)
+            folium_static(segment_map, width=800, height=600)
             st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.error(f"Segment {segment_to_view} introuvable dans les traces.")
